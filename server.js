@@ -1,15 +1,16 @@
 /*
-CSC3916 HW4
+CSC3916 HW5
 File: server.js
-Description: Web API scaffolding for Movie API
+Description: Web API for Movie API with JWT protected endpoints,
+top-rated movies, movie details with reviews, and review creation
 */
 
 require('dotenv').config();
 var express = require('express');
 var bodyParser = require('body-parser');
 var passport = require('passport');
-var authController = require('./auth');
-var authJwtController = require('./auth_jwt');
+require('./auth');
+require('./auth_jwt');
 var jwt = require('jsonwebtoken');
 var cors = require('cors');
 var mongoose = require('mongoose');
@@ -25,33 +26,14 @@ app.use(bodyParser.urlencoded({ extended: false }));
 
 app.use(passport.initialize());
 
-
 var router = express.Router();
-
-function getJSONObjectForMovieRequirement(req) {
-    var json = {
-        headers: "No headers",
-        key: process.env.UNIQUE_KEY,
-        body: "No body"
-    };
-
-    if (req.body != null) {
-        json.body = req.body;
-    }
-
-    if (req.headers != null) {
-        json.headers = req.headers;
-    }
-
-    return json;
-}
 
 // SIGN UP
 router.post('/signup', function(req, res) {
-    if (!req.body.username || !req.body.password) {
+    if (!req.body.username || !req.body.password || !req.body.name) {
         return res.json({
             success: false,
-            msg: 'Please include both username and password to signup.'
+            msg: 'Please include name, username, and password to signup.'
         });
     }
 
@@ -101,7 +83,7 @@ router.post('/signin', function(req, res) {
 
             user.comparePassword(userNew.password, function(isMatch) {
                 if (isMatch) {
-                    var userToken = { id: user.id, username: user.username };
+                    var userToken = { id: user._id, username: user.username };
                     var token = jwt.sign(userToken, process.env.SECRET_KEY);
 
                     res.json({
@@ -118,15 +100,37 @@ router.post('/signin', function(req, res) {
         });
 });
 
-// GET ALL MOVIES
-router.get('/movies', async function(req, res) {
-    try {
-        var movies = await Movie.find({});
-        res.json(movies);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+// GET ALL MOVIES - sorted by average rating descending
+router.get(
+    '/movies',
+    passport.authenticate('jwt', { session: false }),
+    async function(req, res) {
+        try {
+            var movies = await Movie.aggregate([
+                {
+                    $lookup: {
+                        from: 'reviews',
+                        localField: '_id',
+                        foreignField: 'movieId',
+                        as: 'movieReviews'
+                    }
+                },
+                {
+                    $addFields: {
+                        avgRating: { $avg: '$movieReviews.rating' }
+                    }
+                },
+                {
+                    $sort: { avgRating: -1 }
+                }
+            ]);
+
+            res.json(movies);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     }
-});
+);
 
 // CREATE MOVIE
 router.post(
@@ -143,13 +147,14 @@ router.post(
     }
 );
 
-// GET ONE MOVIE
-// If ?reviews=true is added, return movie info + reviews
-router.get('/movies/:id', async function(req, res) {
-    try {
-        var movieId = req.params.id;
+// GET ONE MOVIE WITH REVIEWS AND AVG RATING
+router.get(
+    '/movies/:id',
+    passport.authenticate('jwt', { session: false }),
+    async function(req, res) {
+        try {
+            var movieId = req.params.id;
 
-        if (req.query.reviews === 'true') {
             var result = await Movie.aggregate([
                 {
                     $match: {
@@ -161,7 +166,12 @@ router.get('/movies/:id', async function(req, res) {
                         from: 'reviews',
                         localField: '_id',
                         foreignField: 'movieId',
-                        as: 'reviews'
+                        as: 'movieReviews'
+                    }
+                },
+                {
+                    $addFields: {
+                        avgRating: { $avg: '$movieReviews.rating' }
                     }
                 }
             ]);
@@ -170,20 +180,12 @@ router.get('/movies/:id', async function(req, res) {
                 return res.status(404).json({ message: 'Movie not found' });
             }
 
-            return res.json(result[0]);
+            res.json(result[0]);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
         }
-
-        var movie = await Movie.findById(movieId);
-
-        if (!movie) {
-            return res.status(404).json({ message: 'Movie not found' });
-        }
-
-        res.json(movie);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
     }
-});
+);
 
 // UPDATE MOVIE
 router.put(
@@ -211,7 +213,7 @@ router.put(
 // DELETE MOVIE
 router.delete(
     '/movies/:id',
-    passport.authenticate('basic', { session: false }),
+    passport.authenticate('jwt', { session: false }),
     async function(req, res) {
         try {
             var deletedMovie = await Movie.findByIdAndDelete(req.params.id);
@@ -234,7 +236,7 @@ router.post(
     async function(req, res) {
         try {
             var movieId = req.body.movieId;
-            var username = req.body.username;
+            var username = req.user.username;
             var reviewText = req.body.review;
             var rating = req.body.rating;
 
@@ -253,7 +255,32 @@ router.post(
 
             await newReview.save();
 
-            res.json({ message: 'Review created!' });
+            res.status(201).json({
+                message: 'Review created!',
+                review: newReview
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
+
+// OPTIONAL: SEARCH MOVIES (extra credit)
+router.post(
+    '/movies/search',
+    passport.authenticate('jwt', { session: false }),
+    async function(req, res) {
+        try {
+            var search = req.body.search;
+
+            var movies = await Movie.find({
+                $or: [
+                    { title: { $regex: search, $options: 'i' } },
+                    { 'actors.actorName': { $regex: search, $options: 'i' } }
+                ]
+            });
+
+            res.json(movies);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
